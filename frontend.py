@@ -1,4 +1,4 @@
-pip install gspread toml
+pip install -r requirements.txt
 
 import streamlit as st
 import gspread
