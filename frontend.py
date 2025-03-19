@@ -1,4 +1,4 @@
-!pip install gspread toml
+pip install gspread toml
 
 import streamlit as st
 import gspread
