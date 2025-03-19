@@ -55,7 +55,7 @@ if not st.session_state.authenticated:
 # Main application after successful login
 def authenticate_google_sheets():
     try:
-        secret_path = Path(r"Google Sheet Interface\secret.toml")
+        secret_path = Path(r"secret.toml")
         secrets = toml.load(secret_path)
         
         scope = ["https://spreadsheets.google.com/feeds", 
