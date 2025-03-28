@@ -3,140 +3,334 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import toml
 from pathlib import Path
-from datetime import datetime
-import hashlib
+from functools import lru_cache
 
-# User credentials dictionary (username: password)
-employees = [
-    "Jitendra Ghormade", "Dinesh More", "Sankoch Ghadqhe", "Abhijit Jambhle",
-    "Roshan Tamatta", "Sudhanshu Mane", "Omkar Chavan", "Shashi Shirsat", 
-    "Saeed Shaikh", "Rahul Chaurasiya", "Disha Gokhlani", "Harsh Palavia",
-    "Harsh Khurana", "Rishikesh Pawar", "Jesal Shah", "Rajendra Korgaonkar",
-    "Darshana Bansode", "Vikram Bansode", "Anand Dhaware", "Maruti Tambe", "Garv Bhatia"
-]
-
-USER_CREDENTIALS = {}
-for employee in employees:
-    first_name, last_name = employee.split()
-    email = f"{first_name[0].lower()}.{last_name.lower()}@123"
-    USER_CREDENTIALS[employee] = email
-
-def authenticate_user(username, password):
-    """Check if username exists and password matches"""
-    if username in USER_CREDENTIALS:
-        return USER_CREDENTIALS[username] == password
-    return False
-
-for username, password in USER_CREDENTIALS.items():
-    print(f"Username: {username}, Password: {password}")
+# Constants
+DEPARTMENTS = ["Sales", "Marketing", "HR", "IT", "Operations", "Finance"]
+MONTHS = ["January", "February", "March", "April", "May", "June",
+          "July", "August", "September", "October", "November", "December"]
+STATUS_OPTIONS = ["Not Started", "Working", "Completed", "Incomplete"]
+STATUS_EMOJIS = {
+    "Not Started": "⏳",
+    "Working": "🔄",
+    "Completed": "✅",
+    "Incomplete": "❌"
+}
 
 # Initialize session state
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-if "current_user" not in st.session_state:
-    st.session_state.current_user = None
+def init_session_state():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if "current_user" not in st.session_state:
+        st.session_state.current_user = None
+    if "current_user_fullname" not in st.session_state:
+        st.session_state.current_user_fullname = None
+    if "edit_mode" not in st.session_state:
+        st.session_state.edit_mode = False
+    if "current_dept" not in st.session_state:
+        st.session_state.current_dept = None
+    if "add_task_mode" not in st.session_state:
+        st.session_state.add_task_mode = False
+    if "selected_month" not in st.session_state:
+        st.session_state.selected_month = "March"
 
-# Login form
-if not st.session_state.authenticated:
-    st.title("Task Management Login")
-    
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    
-    if st.button("Login"):
-        if authenticate_user(username, password):
-            st.session_state.authenticated = True
-            st.session_state.current_user = username
-            st.rerun()
-        else:
-            st.error("Invalid username or password")
-    st.stop()
+def navigate_home():
+    """Reset all modes to show the dashboard"""
+    st.session_state.edit_mode = False
+    st.session_state.add_task_mode = False
+    st.session_state.current_dept = None
+    st.rerun()
 
-# Main application after successful login
-def authenticate_google_sheets():
+# Authentication
+@st.cache_data(ttl=3600)
+def get_user_credentials(_gc):
     try:
-        secret_path = Path(r"secret.toml")
-        secrets = toml.load(secret_path)
+        # Access the Credentials sheet
+        sheet = _gc.open("DataCollection").worksheet("Credentials")
+        records = sheet.get_all_records()
         
-        scope = ["https://spreadsheets.google.com/feeds", 
-                 "https://www.googleapis.com/auth/drive"]
-        
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            secrets["gcp_service_account"], scope)
-            
-        client = gspread.authorize(creds)
-        return client
-        
-    except FileNotFoundError:
-        st.error("Secret file not found. Check the file path.")
-        return None
+        # Create a dictionary of {username: (password, fullname)}
+        credentials = {}
+        for record in records:
+            if "Username" in record and "Password" in record and "Name" in record:
+                credentials[record["Username"]] = {
+                    "password": record["Password"],
+                    "fullname": record["Name"]
+                }
+        return credentials
     except Exception as e:
-        st.error(f"Authentication failed: {str(e)}")
-        return None
-
-def get_current_tasks(gc, username):
-    try:
-        spreadsheet = gc.open("DataCollection")
-        worksheet = spreadsheet.get_worksheet(0)
-        records = worksheet.get_all_records()
-        
-        current_tasks = {}
-        for row in reversed(records):
-            name = row.get('Name', '')
-            task = row.get('Key Task', '')
-            if name == username and task:
-                current_tasks[name] = task
-                break  # Only need the latest task for the user
-        return current_tasks
-        
-    except Exception as e:
-        st.error(f"Error fetching tasks: {str(e)}")
+        st.error(f"Error retrieving credentials: {e}")
         return {}
 
-# Application header with logout
-st.title(f"Task Management System - Welcome {st.session_state.current_user}")
+def authenticate_user(_gc, username, password):
+    credentials = get_user_credentials(_gc)
+    if username in credentials:
+        if credentials[username]["password"] == password:
+            st.session_state.current_user_fullname = credentials[username]["fullname"]
+            return True
+    return False
 
-# Rest of your existing application code
-with st.sidebar:
-    st.header("Current Focus")
-    gc = authenticate_google_sheets()
-    if gc:
-        current_tasks = get_current_tasks(gc, st.session_state.current_user)
-        if current_tasks:
-            for name, task in current_tasks.items():
-                st.markdown(f"""
-                **{name}**  
-                *Primary goal right now:*  
-                {task}
-                """)
-                st.divider()
-        else:
-            st.info("No current tasks found")
+# Google Sheets connection
+@st.cache_resource(ttl=300)
+def get_gc():
+    try:
+        secrets = toml.load(Path(r'Google Sheet Interface\secret.toml'))
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            secrets["gcp_service_account"],
+            ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        )
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"Connection error: {e}")
+        return None
 
-with st.form("task_form"):
-    name = st.session_state.current_user  # Automatically fill the name with the logged-in user
-    key_task = st.text_input("Key Task")
-    quantifiable_measures = st.text_input("Quantifiable Measures")
-    
-    submitted = st.form_submit_button("Submit Task")
-    
-    if submitted:
-        gc = authenticate_google_sheets()
-        if gc:
-            try:
-                spreadsheet = gc.open("DataCollection")
-                worksheet = spreadsheet.get_worksheet(0)
-                
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                worksheet.append_row([name, key_task, quantifiable_measures, timestamp])
-                
-                st.success("✅ Task successfully logged!")
+# Data operations
+@st.cache_data(ttl=60, show_spinner="Loading tasks...")
+def get_user_data(_gc, fullname, month):
+    try:
+        sheet = _gc.open("DataCollection").worksheet("Goals")
+        records = sheet.get_all_records()
+        
+        data = [
+            {
+                "department": row["Department"],
+                "goal": row["Main Goal"],
+                "tasks": [
+                    {
+                        "desc": row[f"Task {i}"].strip(),
+                        "status": row[f"Task {i} Status"].strip() or "Not Started"
+                    }
+                    for i in range(1, 6)
+                    if row.get(f"Task {i}", "").strip() and row[f"Task {i}"].strip() != "--"
+                ],
+                "row": idx + 2
+            }
+            for idx, row in enumerate(records)
+            if row["Name"] == fullname and row["Month"] == month
+        ]
+        
+        if not data:
+            print(f"No tasks found for {fullname} in {month}")
+            print("Available names in sheet:", set(row.get("Name") for row in records))
+        
+        return data
+    except Exception as e:
+        st.error(f"Data error: {e}")
+        print(f"Error in get_user_data: {e}")
+        return []
+
+def update_entire_row(_gc, row, department, goal, tasks):
+    try:
+        sheet = _gc.open("DataCollection").worksheet("Goals")
+        row_data = [st.session_state.current_user_fullname, department, goal, st.session_state.selected_month]
+        for i in range(1, 6):
+            if i <= len(tasks):
+                row_data.extend([tasks[i-1]["desc"], tasks[i-1]["status"]])
+            else:
+                row_data.extend(["--", ""])
+        sheet.update(f"A{row}:N{row}", [row_data])
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Update failed: {e}")
+        return False
+
+def add_new_task(_gc, fullname, month, department, goal, tasks):
+    try:
+        sheet = _gc.open("DataCollection").worksheet("Goals")
+        new_row = [fullname, department, goal, month]
+        for i in range(1, 6):
+            if i <= len(tasks):
+                new_row.extend([tasks[i-1]["desc"], tasks[i-1]["status"]])
+            else:
+                new_row.extend(["--", ""])
+        sheet.append_row(new_row)
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Add task failed: {e}")
+        return False
+
+# UI Components
+def login_page():
+    st.title("Task Management Login")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        
+        if st.form_submit_button("Login"):
+            gc = get_gc()
+            if not gc:
+                st.error("Failed to connect to Google Sheets. Please try again later.")
+                st.stop()
+            
+            if authenticate_user(gc, username, password):
+                st.session_state.authenticated = True
+                st.session_state.current_user = username
                 st.rerun()
-                
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-                
-st.button("Logout", on_click=lambda: st.session_state.update({
-    "authenticated": False,
-    "current_user": None
-}))
+            else:
+                st.error("Invalid credentials")
+    st.stop()
+
+def sidebar_content():
+    with st.sidebar:
+        st.header("Task Management")
+        
+        # Home button
+        if st.button("🏠 Home"):
+            navigate_home()
+        
+        # Month selector
+        st.session_state.selected_month = st.selectbox(
+            "Month", 
+            MONTHS,
+            index=MONTHS.index(st.session_state.get("selected_month", "March")))
+        
+        # Add Task button
+        if st.button("➕ Add New Task"):
+            st.session_state.add_task_mode = True
+            st.session_state.edit_mode = False
+            st.rerun()
+        
+        gc = get_gc()
+        if gc and st.session_state.current_user_fullname:
+            data = get_user_data(gc, st.session_state.current_user_fullname, st.session_state.selected_month)
+            
+            if not data:
+                st.info("No tasks found for selected month")
+            else:
+                for dept in data:
+                    with st.expander(f"{dept['department']} - {dept['goal']}", expanded=False):
+                        st.markdown("**Main Tasks:**")
+                        for task in dept["tasks"]:
+                            st.markdown(
+                                f"<p style='font-size: 14px;'>{STATUS_EMOJIS.get(task['status'], '⏳')} {task['desc']}</p>", 
+                                unsafe_allow_html=True
+                            )
+                        if st.button(f"✏️ Edit", key=f"edit_{dept['department']}"):
+                            st.session_state.edit_mode = True
+                            st.session_state.current_dept = dept
+                            st.rerun()
+
+        # Logout button
+        if st.button("🚪 Logout"):
+            st.session_state.clear()
+            st.rerun()
+
+def add_task_form():
+    st.title("Add New Task")
+    
+    with st.form("add_task_form"):
+        department = st.selectbox("Department", DEPARTMENTS, index=0)
+        goal = st.text_input("Main Goal")
+        
+        st.markdown("**Tasks:**")
+        tasks = []
+        for i in range(5):
+            cols = st.columns([4, 1])
+            task_desc = cols[0].text_input(
+                f"Task {i+1}",
+                key=f"new_task_{i}",
+                placeholder="Enter task description"
+            )
+            task_status = cols[1].selectbox(
+                "Status",
+                STATUS_OPTIONS,
+                index=0,
+                key=f"new_status_{i}"
+            )
+            if task_desc.strip():
+                tasks.append({"desc": task_desc, "status": task_status})
+        
+        col1, col2 = st.columns(2)
+        if col1.form_submit_button("💾 Save"):
+            if not goal.strip():
+                st.error("Please enter a main goal")
+            elif not tasks:
+                st.error("Please add at least one task")
+            else:
+                gc = get_gc()
+                if gc and add_new_task(gc, st.session_state.current_user_fullname, 
+                                      st.session_state.selected_month, department, goal, tasks):
+                    st.session_state.add_task_mode = False
+                    st.rerun()
+        
+        if col2.form_submit_button("✖️ Cancel"):
+            st.session_state.add_task_mode = False
+            st.rerun()
+
+def edit_task_form():
+    st.title(f"Edit {st.session_state.current_dept['department']} Tasks")
+    
+    with st.form("edit_form"):
+        st.text_input("Department", value=st.session_state.current_dept['department'], disabled=True)
+        goal = st.text_input("Main Goal", value=st.session_state.current_dept['goal'], key="edit_goal")
+        
+        st.markdown("**Tasks:**")
+        tasks = st.session_state.current_dept["tasks"]
+        edited_tasks = []
+        
+        for i in range(5):
+            if i < len(tasks):
+                task = tasks[i]
+            else:
+                task = {"desc": "", "status": "Not Started"}
+            
+            cols = st.columns([4, 1])
+            task_desc = cols[0].text_input(
+                f"Task {i+1}",
+                value=task["desc"],
+                key=f"edit_task_{i}",
+                placeholder="Enter task description"
+            )
+            task_status = cols[1].selectbox(
+                "Status",
+                STATUS_OPTIONS,
+                index=STATUS_OPTIONS.index(task["status"]),
+                key=f"edit_status_{i}"
+            )
+            if task_desc.strip():
+                edited_tasks.append({"desc": task_desc, "status": task_status})
+        
+        col1, col2 = st.columns(2)
+        if col1.form_submit_button("💾 Save"):
+            gc = get_gc()
+            if gc and update_entire_row(
+                gc,
+                st.session_state.current_dept["row"],
+                st.session_state.current_dept['department'],
+                goal,
+                edited_tasks
+            ):
+                st.session_state.edit_mode = False
+                st.session_state.current_dept = None
+                st.rerun()
+        
+        if col2.form_submit_button("✖️ Cancel"):
+            st.session_state.edit_mode = False
+            st.session_state.current_dept = None
+            st.rerun()
+
+def dashboard_page():
+    st.title("Overview Dashboard")
+    st.write(f"Welcome, {st.session_state.current_user_fullname or st.session_state.current_user}")
+    st.write("Use the sidebar to manage your tasks or click 'Add New Task' to get started")
+
+# Main App
+def main():    
+    init_session_state()
+    
+    if not st.session_state.authenticated:
+        login_page()
+    
+    sidebar_content()
+    
+    if st.session_state.add_task_mode:
+        add_task_form()
+    elif st.session_state.edit_mode:
+        edit_task_form()
+    else:
+        dashboard_page()
+
+if __name__ == "__main__":
+    main()
