@@ -3,7 +3,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import toml
 from pathlib import Path
-from functools import lru_cache
+from datetime import datetime
 
 # Constants
 DEPARTMENTS = ["Sales", "Marketing", "HR", "IT", "Operations", "Finance"]
@@ -33,6 +33,8 @@ def init_session_state():
         st.session_state.add_task_mode = False
     if "selected_month" not in st.session_state:
         st.session_state.selected_month = "March"
+    if "last_update_date" not in st.session_state:
+        st.session_state.last_update_date = None
 
 def navigate_home():
     """Reset all modes to show the dashboard"""
@@ -149,6 +151,57 @@ def add_new_task(_gc, fullname, month, department, goal, tasks):
         return True
     except Exception as e:
         st.error(f"Add task failed: {e}")
+        return False
+
+def log_daily_update(_gc, fullname, date, update_text):
+    try:
+        sheet = _gc.open("DataCollection").worksheet("Daily Updates")
+        
+        # Get all data (not using get_all_records to avoid header uniqueness issue)
+        all_data = sheet.get_all_values()
+        
+        if not all_data:
+            st.error("No data found in Daily Updates sheet")
+            return False
+            
+        headers = all_data[0]  # First row is headers
+        data_rows = all_data[1:]  # Rest are data rows
+        
+        # Find the column index for the date
+        try:
+            col_index = headers.index(date) + 1  # +1 because Sheets are 1-indexed
+        except ValueError:
+            st.error(f"Date column {date} not found in sheet")
+            return False
+        
+        # Find the row for this user
+        name_col_index = headers.index("Name") + 1 if "Name" in headers else 0
+        if name_col_index == 0:
+            st.error("'Name' column not found in sheet")
+            return False
+            
+        row_found = False
+        row_number = None
+        
+        # Check existing rows
+        for i, row in enumerate(data_rows, start=2):  # start=2 because of header row
+            if len(row) > name_col_index - 1 and row[name_col_index - 1] == fullname:
+                # Update the cell
+                sheet.update_cell(i, col_index, update_text)
+                row_found = True
+                break
+        
+        # If user not found, add new row
+        if not row_found:
+            new_row = [""] * len(headers)
+            new_row[name_col_index - 1] = fullname  # Set name in correct position
+            new_row[col_index - 1] = update_text    # Set update in correct position
+            sheet.append_row(new_row)
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Failed to log daily update: {e}")
         return False
 
 # UI Components
@@ -314,7 +367,29 @@ def edit_task_form():
 def dashboard_page():
     st.title("Overview Dashboard")
     st.write(f"Welcome, {st.session_state.current_user_fullname or st.session_state.current_user}")
-    st.write("Use the sidebar to manage your tasks or click 'Add New Task' to get started")
+    
+    # Display the original message only if no update is being submitted
+    if "last_update_date" not in st.session_state or not st.session_state.last_update_date:
+        st.write("Use the sidebar to manage your tasks or click 'Add New Task' to get started")
+    
+    # Daily update form
+    with st.form("daily_update_form"):
+        today = st.date_input("Date", value="today")
+        update_text = st.text_area("What did you work on today?", 
+                                 placeholder="Enter your daily update here...")
+        
+        if st.form_submit_button("Submit Daily Update"):
+            if update_text.strip():
+                gc = get_gc()
+                if gc and log_daily_update(gc, 
+                                         st.session_state.current_user_fullname, 
+                                         today.strftime("%d-%b-%Y"), 
+                                         update_text):
+                    st.success("Daily update logged successfully!")
+                    st.session_state.last_update_date = today.strftime("%d-%b-%Y")
+                    st.rerun()
+            else:
+                st.warning("Please enter your update before submitting")
 
 # Main App
 def main():    
