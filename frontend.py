@@ -98,7 +98,7 @@ def login_page():
 @st.cache_resource(ttl=300)
 def get_gc():
     try:
-        secrets = toml.load(Path(r'Google Sheet Interface\secret.toml'))
+        secrets = toml.load(Path(r'secret.toml'))
         creds = ServiceAccountCredentials.from_json_keyfile_dict(
             secrets["gcp_service_account"],
             ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
