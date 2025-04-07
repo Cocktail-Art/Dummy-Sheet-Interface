@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Constants
-DEPARTMENTS = ["Sales", "Marketing", "HR", "IT", "Operations", "Finance"]
+DEPARTMENTS = ['Marketing','Sales','Operations','Accounts','Management']
 MONTHS = ["January", "February", "March", "April", "May", "June",
           "July", "August", "September", "October", "November", "December"]
 STATUS_OPTIONS = ["Not Started", "Working", "Completed", "Incomplete"]
@@ -25,6 +25,8 @@ def init_session_state():
         st.session_state.current_user = None
     if "current_user_fullname" not in st.session_state:
         st.session_state.current_user_fullname = None
+    if "current_user_role" not in st.session_state:
+        st.session_state.current_user_role = None
     if "edit_mode" not in st.session_state:
         st.session_state.edit_mode = False
     if "current_dept" not in st.session_state:
@@ -47,17 +49,16 @@ def navigate_home():
 @st.cache_data(ttl=3600)
 def get_user_credentials(_gc):
     try:
-        # Access the Credentials sheet
         sheet = _gc.open("DataCollection").worksheet("Credentials")
         records = sheet.get_all_records()
         
-        # Create a dictionary of {username: (password, fullname)}
         credentials = {}
         for record in records:
             if "Username" in record and "Password" in record and "Name" in record:
                 credentials[record["Username"]] = {
                     "password": record["Password"],
-                    "fullname": record["Name"]
+                    "fullname": record["Name"],
+                    "role": record.get("Role", "User")
                 }
         return credentials
     except Exception as e:
@@ -69,14 +70,35 @@ def authenticate_user(_gc, username, password):
     if username in credentials:
         if credentials[username]["password"] == password:
             st.session_state.current_user_fullname = credentials[username]["fullname"]
+            st.session_state.current_user_role = credentials[username]["role"]
             return True
     return False
+
+def login_page():
+    st.title("Task Management Login")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        
+        if st.form_submit_button("Login"):
+            gc = get_gc()
+            if not gc:
+                st.error("Failed to connect to Google Sheets. Please try again later.")
+                st.stop()
+            
+            if authenticate_user(gc, username, password):
+                st.session_state.authenticated = True
+                st.session_state.current_user = username
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+    st.stop()
 
 # Google Sheets connection
 @st.cache_resource(ttl=300)
 def get_gc():
     try:
-        secrets = toml.load(Path(r'secret.toml'))
+        secrets = toml.load(Path(r'Google Sheet Interface\secret.toml'))
         creds = ServiceAccountCredentials.from_json_keyfile_dict(
             secrets["gcp_service_account"],
             ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -111,14 +133,9 @@ def get_user_data(_gc, fullname, month):
             if row["Name"] == fullname and row["Month"] == month
         ]
         
-        if not data:
-            print(f"No tasks found for {fullname} in {month}")
-            print("Available names in sheet:", set(row.get("Name") for row in records))
-        
         return data
     except Exception as e:
         st.error(f"Data error: {e}")
-        print(f"Error in get_user_data: {e}")
         return []
 
 def update_entire_row(_gc, row, department, goal, tasks):
@@ -156,25 +173,21 @@ def add_new_task(_gc, fullname, month, department, goal, tasks):
 def log_daily_update(_gc, fullname, date, update_text):
     try:
         sheet = _gc.open("DataCollection").worksheet("Daily Updates")
-        
-        # Get all data (not using get_all_records to avoid header uniqueness issue)
         all_data = sheet.get_all_values()
         
         if not all_data:
             st.error("No data found in Daily Updates sheet")
             return False
             
-        headers = all_data[0]  # First row is headers
-        data_rows = all_data[1:]  # Rest are data rows
+        headers = all_data[0]
+        data_rows = all_data[1:]
         
-        # Find the column index for the date
         try:
-            col_index = headers.index(date) + 1  # +1 because Sheets are 1-indexed
+            col_index = headers.index(date) + 1
         except ValueError:
             st.error(f"Date column {date} not found in sheet")
             return False
         
-        # Find the row for this user
         name_col_index = headers.index("Name") + 1 if "Name" in headers else 0
         if name_col_index == 0:
             st.error("'Name' column not found in sheet")
@@ -183,19 +196,16 @@ def log_daily_update(_gc, fullname, date, update_text):
         row_found = False
         row_number = None
         
-        # Check existing rows
-        for i, row in enumerate(data_rows, start=2):  # start=2 because of header row
+        for i, row in enumerate(data_rows, start=2):
             if len(row) > name_col_index - 1 and row[name_col_index - 1] == fullname:
-                # Update the cell
                 sheet.update_cell(i, col_index, update_text)
                 row_found = True
                 break
         
-        # If user not found, add new row
         if not row_found:
             new_row = [""] * len(headers)
-            new_row[name_col_index - 1] = fullname  # Set name in correct position
-            new_row[col_index - 1] = update_text    # Set update in correct position
+            new_row[name_col_index - 1] = fullname
+            new_row[col_index - 1] = update_text
             sheet.append_row(new_row)
         
         return True
@@ -204,42 +214,85 @@ def log_daily_update(_gc, fullname, date, update_text):
         st.error(f"Failed to log daily update: {e}")
         return False
 
-# UI Components
-def login_page():
-    st.title("Task Management Login")
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        
-        if st.form_submit_button("Login"):
-            gc = get_gc()
-            if not gc:
-                st.error("Failed to connect to Google Sheets. Please try again later.")
-                st.stop()
+# Master Dashboard Components
+def master_dashboard_page():
+    st.title("Master Dashboard")
+    st.write(f"Welcome Master {st.session_state.current_user_fullname}")
+    
+    gc = get_gc()
+    if not gc:
+        st.error("Failed to connect to Google Sheets")
+        return
+    
+    with st.expander("👥 User Management"):
+        try:
+            sheet = gc.open("DataCollection").worksheet("Credentials")
+            users = sheet.get_all_records()
+            # st.dataframe(users)
             
-            if authenticate_user(gc, username, password):
-                st.session_state.authenticated = True
-                st.session_state.current_user = username
-                st.rerun()
-            else:
-                st.error("Invalid credentials")
-    st.stop()
+            col1, col2 = st.columns(2)
+            with col1:
+                with st.form("add_user_form"):
+                    st.subheader("Add New User")
+                    new_username = st.text_input("Username")
+                    new_password = st.text_input("Password", type="password")
+                    new_name = st.text_input("Full Name")
+                    new_role = st.selectbox("Role", ["User", "Master"])
+                    
+                    if st.form_submit_button("Add User"):
+                        if new_username and new_password and new_name:
+                            sheet.append_row([new_username, new_password, new_name, new_role])
+                            st.success("User added successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Please fill all fields")
+            
+            with col2:
+                with st.form("delete_user_form"):
+                    st.subheader("Delete User")
+                    delete_username = st.selectbox(
+                        "Select user to delete",
+                        [user["Username"] for user in users]
+                    )
+                    
+                    if st.form_submit_button("Delete User"):
+                        cell = sheet.find(delete_username)
+                        sheet.delete_rows(cell.row)
+                        st.success("User deleted successfully!")
+                        st.rerun()
+                        
+        except Exception as e:
+            st.error(f"Error accessing user data: {e}")
+    
+    with st.expander("📊 All Tasks Overview"):
+        try:
+            sheet = gc.open("DataCollection").worksheet("Goals")
+            all_tasks = sheet.get_all_records()
+            st.dataframe(all_tasks)
+        except Exception as e:
+            st.error(f"Error accessing tasks: {e}")
+    
+    with st.expander("📅 Daily Updates Monitor"):
+        try:
+            sheet = gc.open("DataCollection").worksheet("Daily Updates")
+            updates = sheet.get_all_records()
+            st.dataframe(updates)
+        except Exception as e:
+            st.error(f"Error accessing daily updates: {e}")
 
+# Regular User Components
 def sidebar_content():
     with st.sidebar:
         st.header("Task Management")
         
-        # Home button
         if st.button("🏠 Home"):
             navigate_home()
         
-        # Month selector
         st.session_state.selected_month = st.selectbox(
             "Month", 
             MONTHS,
             index=MONTHS.index(st.session_state.get("selected_month", "March")))
         
-        # Add Task button
         if st.button("➕ Add New Task"):
             st.session_state.add_task_mode = True
             st.session_state.edit_mode = False
@@ -265,7 +318,6 @@ def sidebar_content():
                             st.session_state.current_dept = dept
                             st.rerun()
 
-        # Logout button
         if st.button("🚪 Logout"):
             st.session_state.clear()
             st.rerun()
@@ -368,11 +420,9 @@ def dashboard_page():
     st.title("Overview Dashboard")
     st.write(f"Welcome, {st.session_state.current_user_fullname or st.session_state.current_user}")
     
-    # Display the original message only if no update is being submitted
     if "last_update_date" not in st.session_state or not st.session_state.last_update_date:
         st.write("Use the sidebar to manage your tasks or click 'Add New Task' to get started")
     
-    # Daily update form
     with st.form("daily_update_form"):
         today = st.date_input("Date", value="today")
         update_text = st.text_area("What did you work on today?", 
@@ -398,6 +448,12 @@ def main():
     if not st.session_state.authenticated:
         login_page()
     
+    # Role-based routing
+    if st.session_state.get("current_user_role") == "Master":
+        master_dashboard_page()
+        return
+    
+    # Regular user flow
     sidebar_content()
     
     if st.session_state.add_task_mode:
